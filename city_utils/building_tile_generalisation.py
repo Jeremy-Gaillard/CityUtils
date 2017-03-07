@@ -75,6 +75,7 @@ if __name__ == '__main__':
     # test
     #test = utils.CitiesConfig.allRepresentations(args.city, "buildings")
     t_source = "test.lod2"
+    t_features = "test.buildings"
     t_tiles = "test.tiles"
     t_hierarchy = "test.hierarchy"
     t_destination = "test.lod1"
@@ -94,16 +95,16 @@ if __name__ == '__main__':
     maxDepth = cursor.fetchone()[0]
 
     # Generalise leaf tiles from lod2 geometry
-    query = ("WITH t AS (SELECT tile, ST_3Dextent(geom) AS box, ST_Multi(ST_ConcaveHull(ST_force2D(ST_Collect(('0106' || substring(geom::text from 5))::geometry)), 0.99)) AS hull FROM {0} WHERE tile IS NOT NULL GROUP BY tile)"
-             "INSERT INTO {1} (tile, geom, zmin, zmax) SELECT tile, hull, ST_ZMin(box), ST_ZMax(box) FROM t".format(t_source, t_destination))
+    query = ("WITH t AS (SELECT tile, ST_3Dextent(geom) AS box, ST_Multi(ST_ConcaveHull(ST_force2D(ST_Collect(('0106' || substring(geom::text from 5))::geometry)), 0.99)) AS hull FROM {0} INNER JOIN {2} ON {0}.gid={2}.gid WHERE tile IS NOT NULL GROUP BY tile)"
+             "INSERT INTO {1} (tile, geom, zmin, zmax) SELECT tile, hull, ST_ZMin(box), ST_ZMax(box) FROM t".format(t_source, t_destination, t_features))
     cursor.execute(query)
-    query = "UPDATE {0} SET geom=ST_Multi(ST_Intersection(geom, footprint)) FROM {1} WHERE {0}.tile={1}.gid AND depth={2}".format(t_destination, t_tiles, maxDepth)
+    query = "UPDATE {0} SET geom=ST_Multi(ST_Intersection(geom, footprint)) FROM {1} WHERE {0}.tile={1}.tile AND depth={2}".format(t_destination, t_tiles, maxDepth)
     cursor.execute(query)
 
     # Generalise remaining tiles from children tiles
     for i in reversed(range(maxDepth)):
-        query = "SELECT {0}.tile, {0}.child FROM {0} INNER JOIN {1} ON {0}.tile={1}.gid WHERE depth={2}".format(t_hierarchy, t_tiles, i)
+        query = "SELECT {0}.tile, {0}.child FROM {0} INNER JOIN {1} ON {0}.tile={1}.tile WHERE depth={2}".format(t_hierarchy, t_tiles, i)
         query = "WITH t AS ({0}) INSERT INTO {1} (SELECT t.tile, ST_Multi(ST_ConcaveHull(ST_Union(geom),0.99)), min(zmin), max(zmax) FROM t INNER JOIN {1} ON t.child={1}.tile GROUP BY t.tile)".format(query, t_destination)
         cursor.execute(query)
-        query = "UPDATE {0} SET geom=ST_Multi(ST_Intersection(geom, footprint)) FROM {1} WHERE {0}.tile={1}.gid AND depth={2}".format(t_destination, t_tiles, i)
+        query = "UPDATE {0} SET geom=ST_Multi(ST_Intersection(geom, footprint)) FROM {1} WHERE {0}.tile={1}.tile AND depth={2}".format(t_destination, t_tiles, i)
         cursor.execute(query)

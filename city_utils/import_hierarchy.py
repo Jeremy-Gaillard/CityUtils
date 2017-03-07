@@ -72,7 +72,8 @@ if __name__ == '__main__':
 
     t_hierarchy = "test.hierarchy"
     t_tiles = "test.tiles"
-    t_buildings = "test.lod2"
+    t_buildings = "test.buildings"
+    t_buildings_data = "test.lod2"
     epsg = 3946
     db_name = "lyon"
     shp = ["test_files/Lyon/Ilots_reseauroutier_v3.shp test.tiles",
@@ -80,9 +81,11 @@ if __name__ == '__main__':
         "test_files/Lyon/Ilots_reseauroutier.shp test.tiles"]
 
     # Drop tables
-    query = "DROP TABLE IF EXISTS {0}".format(t_tiles)
+    query = "DROP TABLE IF EXISTS {0}".format(t_buildings)
     cursor.execute(query)
     query = "DROP TABLE IF EXISTS {0}".format(t_hierarchy)
+    cursor.execute(query)
+    query = "DROP TABLE IF EXISTS {0}".format(t_tiles)
     cursor.execute(query)
 
     # Create tile table
@@ -94,6 +97,8 @@ if __name__ == '__main__':
     cursor.execute(query)
     query = "ALTER TABLE {0} ADD COLUMN bbox Box3D".format(t_tiles)
     cursor.execute(query)
+    #query = "CREATE INDEX tiles_tile_idx ON {0} (gid)".format(t_tiles)
+    #cursor.execute(query)
 
     # Import tile data
     for i, f in enumerate(shp):
@@ -106,13 +111,18 @@ if __name__ == '__main__':
     # Rename columns
     query = "ALTER TABLE {0} RENAME COLUMN geom TO footprint".format(t_tiles)
     cursor.execute(query)
+    query = "ALTER TABLE {0} RENAME gid TO tile".format(t_tiles)
+    cursor.execute(query)
+    query = "CREATE INDEX tiles_footprint_idx ON {0} using gist(footprint)".format(t_tiles)
+    cursor.execute(query)
 
     # Create hierarchy
-    query = "CREATE TABLE {0} (tile integer, child integer)".format(t_hierarchy)
+    query = "CREATE TABLE {0} (tile serial, child integer)".format(t_hierarchy)
     cursor.execute(query)
     query = "CREATE INDEX hierarchy_tile_idx ON {0} (tile)".format(t_hierarchy)
+    cursor.execute(query)
 
-    query = "SELECT gid, fid, id_parent, depth from {0}".format(t_tiles)
+    query = "SELECT tile, fid, id_parent, depth from {0}".format(t_tiles)
     cursor.execute(query)
 
     parentOf = {}
@@ -127,19 +137,28 @@ if __name__ == '__main__':
     # Suboptimal, see http://stackoverflow.com/questions/8134602/psycopg2-insert-multiple-rows-with-one-query
     cursor.executemany(query + " VALUES (%s, %s)", tileChild)
 
-    # TODO: add column tile and index
+    # Create building table
+    query = "CREATE TABLE {0} (gid serial, tile integer, footprint geometry(Multipolygon, {1}))".format(t_buildings, epsg)
+    cursor.execute(query)
+    query = "CREATE INDEX buildings_gid_idx ON {0} (gid)".format(t_buildings)
+    cursor.execute(query)
+    query = "CREATE INDEX buildings_tile_idx ON {0} (tile)".format(t_buildings)
+    cursor.execute(query)
+
     # Building indexation
+    print("Indexing")
     maxDepth = len(shp) - 1
-    query = ("WITH d AS (SELECT gid, footprint FROM {0} WHERE depth={3})"
-            "UPDATE {1} SET tile = d.gid FROM d WHERE ST_Intersects(d.footprint, ST_Centroid(ST_SetSRID(Box2D({1}.geom), {2})));".format(t_tiles, t_buildings, epsg, maxDepth))
+    query = ("WITH d AS (SELECT tile, footprint FROM {0} WHERE depth={4})"
+            "INSERT INTO {1} (gid, tile) SELECT gid, d.tile FROM {2} INNER JOIN d ON ST_Intersects(d.footprint, ST_Centroid(ST_SetSRID(Box2D({2}.geom), {3})));".format(t_tiles, t_buildings, t_buildings_data, epsg, maxDepth))
     cursor.execute(query)
 
     # Compute bbox
-    query = ("WITH t AS (SELECT tile, ST_ZMin(ST_3DExtent(geom)) AS zmin, ST_ZMax(ST_3DExtent(geom)) AS zmax FROM {1} WHERE tile IS NOT NULL GROUP BY tile)"
-             "UPDATE {0} SET bbox=Box3D(ST_Translate(ST_Extrude(footprint, 0, 0, zmax-zmin), 0, 0, zmin)) FROM t WHERE t.tile = {0}.gid".format(t_tiles, t_buildings))
+    print("Computing bbox")
+    query = ("WITH t AS (SELECT {2}.tile, ST_ZMin(ST_3DExtent(geom)) AS zmin, ST_ZMax(ST_3DExtent(geom)) AS zmax FROM {1} JOIN {2} ON {1}.gid={2}.gid WHERE tile IS NOT NULL GROUP BY {2}.tile)"
+             "UPDATE {0} SET bbox=Box3D(ST_Translate(ST_Extrude(footprint, 0, 0, zmax-zmin), 0, 0, zmin)) FROM t WHERE t.tile = {0}.tile".format(t_tiles, t_buildings_data, t_buildings))
     cursor.execute(query)
     for i in reversed(range(maxDepth)):
-        query = ("WITH t AS (SELECT {0}.tile, {0}.child FROM {0} INNER JOIN {1} ON {0}.tile={1}.gid WHERE depth={2}), "
-                 "d AS (SELECT t.tile, Box3D(ST_3DExtent(bbox)) AS box FROM t INNER JOIN {1} ON t.child={1}.gid GROUP BY t.tile) "
-                 "UPDATE {1} SET bbox=box FROM d WHERE d.tile={1}.gid".format(t_hierarchy, t_tiles, i))
+        query = ("WITH t AS (SELECT {0}.tile, {0}.child FROM {0} INNER JOIN {1} ON {0}.tile={1}.tile WHERE depth={2}), "
+                 "d AS (SELECT t.tile, Box3D(ST_3DExtent(bbox)) AS box FROM t INNER JOIN {1} ON t.child={1}.tile GROUP BY t.tile) "
+                 "UPDATE {1} SET bbox=box FROM d WHERE d.tile={1}.tile".format(t_hierarchy, t_tiles, i))
         cursor.execute(query)
